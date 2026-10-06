@@ -10,6 +10,7 @@ Pauses your music when you start dictating a prompt, and brings it back once you
 - **Any dictation app.** TypeWhisper and superwhisper work out of the box. Add yours with one command.
 - **Leaves meetings alone.** While Zoom, Google Meet, Teams, Slack huddles, FaceTime, Webex or Discord is using your mic, it never pauses or resumes anything.
 - **Only resumes what it paused.** If the music was already off, or you played, skipped or changed it yourself, it stays the way you left it.
+- **Fades, not cuts.** The music fades out in half a second as you start talking and fades back in over a second and a half.
 - **Doesn't touch your prompts.** Nothing is added to your prompt, the system prompt or the context window. It only presses pause and play.
 
 ## Requirements
@@ -77,18 +78,20 @@ osascript -e 'id of app "Wispr Flow"'
 | `/dictation-music reset` | Back to the defaults |
 | `/dictation-music log` | Show recent activity: which apps used the mic, and why the music was or wasn't paused or resumed |
 
-The list lives in `~/.claude/dictation-music/config.json` if you'd rather edit it by hand.
+The list lives in `~/.claude/dictation-music/config.json` if you'd rather edit it by hand. Add `"fade": false` there to pause and play without fading.
 
 Meeting apps and browsers can't be added: browsers are where Google Meet and other web calls run, so treating them as dictation would pause your music on every call.
 
 ## How it works
 
 1. When a session starts, a small Swift helper watches which apps are using the microphone through Core Audio. It never records or reads audio: it only checks *whether* each app has the mic open. Other apps on the mic, such as a screen recorder, are ignored unless they're in your list.
-2. When one of your dictation apps opens the mic and no meeting app has it, the mod asks Now Playing what's on. If something is playing, it pauses it and notes the track and position.
-3. When you submit a prompt, the mod presses play again, but only if:
+2. When one of your dictation apps opens the mic and no meeting app has it, the mod asks Now Playing what's on. If something is playing, it fades the system volume down, pauses, puts the volume back, and notes the track and where it stopped.
+3. When you submit a prompt, the mod plays from silence and fades the volume back up, but only if:
    - the same track is still paused at the same spot (you haven't taken over),
    - no meeting has started since, and
    - the pause is less than 15 minutes old.
+
+The fade works on the system volume, so other sounds dip with it for that half second, including your dictation app's start chime. Your volume ends up exactly where it was. If you have several Claude sessions open, only one of them handles each pause and resume.
 
 **Sending a message while Claude is already working.** Claude Code holds that message until Claude reaches its next step, so the music comes back when Claude picks the message up rather than the moment you press send. It never comes back while your dictation app still has the mic.
 
@@ -109,6 +112,7 @@ Run `/dictation-music` first: it reports what's missing. Then `/dictation-music 
 ```
 hooks/register.ts             the mod: what pauses, when it resumes, the /dictation-music command
 helper/dictation-watch.swift  prints "start <app>" / "stop <app>" as apps open and close the mic
+helper/fade.applescript       fades the system volume around a pause or play
 tests/                        tests against a fake machine (files, mic and player)
 assets/                       the images in this README
 ```

@@ -45,6 +45,11 @@ const STALE_MS = 15 * 60 * 1000
 const FORGET_MS = 2 * 60 * 1000
 // How far the track may have moved while paused (seconds) and still be ours.
 const POSITION_SLACK = 3
+// Fade lengths. Short going out, so the music is gone as you start talking.
+const FADE_OUT_MS = 500
+const FADE_IN_MS = 1500
+// A lock older than this was left by a session that died mid-fade.
+const LOCK_STALE_MS = 20_000
 
 // The activity log `/dictation-music log` shows: lines kept, and shown.
 const LOG_KEEP = 500
@@ -54,8 +59,9 @@ const USAGE = 'Usage: /dictation-music [learn | add <bundle-id> | remove <bundle
 
 // What the mod paused, so it resumes only that, untouched since.
 type Marker = { pausedAt?: number; app?: string; track?: string; position?: number }
-type NowPlaying = { playing: boolean; app?: string; track?: string; position?: number }
-type Config = { apps: string[] }
+type NowPlaying = { playing: boolean; app?: string; track?: string; position?: number; reportedAt?: number }
+// `fade: false` in config.json pauses and plays without fading.
+type Config = { apps: string[]; fade?: boolean }
 
 // Apps holding the mic right now, as this session's helper last reported.
 const capturing = new Set<string>()
@@ -134,6 +140,7 @@ async function nowPlaying($: Dollar, media: string): Promise<NowPlaying> {
       app: now?.bundleIdentifier,
       track: now?.contentItemIdentifier ?? now?.title,
       position: positionNow(now),
+      reportedAt: typeof now?.timestamp === 'string' ? Date.parse(now.timestamp) : undefined,
     }
   } catch {
     return { playing: false }
@@ -147,6 +154,53 @@ function positionNow(now: { elapsedTime?: unknown; timestamp?: unknown; playing?
   const at = typeof now.timestamp === 'string' ? Date.parse(now.timestamp) : NaN
   if (now.playing !== true || Number.isNaN(at)) return now.elapsedTime
   return now.elapsedTime + ((Date.now() - at) / 1000) * (Number(now.playbackRate) || 1)
+}
+
+// Right after a pause media-control still reports the old position for a
+// moment, so wait for a reading taken after `since`.
+async function stoppedAt($: Dollar, media: string, since: number, fallback?: number) {
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const now = await nowPlaying($, media)
+    if (!now.playing && (now.reportedAt ?? 0) >= since - 1000) return now.position
+    await $.clock.sleep(250)
+  }
+  return fallback
+}
+
+// Pauses or plays, fading the system volume around it unless turned off.
+async function fade($: Dollar, media: string, verb: 'pause' | 'play', config: Config) {
+  if (config.fade === false) {
+    await $.process.run([media, verb], { timeoutMs: 5000 })
+    return
+  }
+  const [direction, ms] = verb === 'pause' ? ['out', FADE_OUT_MS] : ['in', FADE_IN_MS]
+  await $.process.run(
+    ['/usr/bin/osascript', `${$.plugin.root}/helper/fade.applescript`, direction, media, String(ms)],
+    { timeoutMs: 10_000 },
+  )
+}
+
+// Every session hears the same mic events. Only one at a time touches the
+// music, so two fades never fight over the volume; mkdir is atomic, so a
+// folder is the lock. Answers false, doing nothing, when another holds it.
+async function withLock($: Dollar, work: () => Promise<unknown>): Promise<boolean> {
+  const lock = `${await stateDir($)}/lock`
+  const take = () => $.process.run(['/bin/mkdir', lock]).then(r => r.exitCode === 0, () => false)
+  let taken = await take()
+  if (!taken) {
+    const age = await $.fs.stat(lock).then(stat => Date.now() - stat.mtimeMs, () => Infinity)
+    if (age > LOCK_STALE_MS) {
+      await $.process.run(['/bin/rmdir', lock]).catch(() => {})
+      taken = await take()
+    }
+  }
+  if (!taken) return false
+  try {
+    await work()
+  } finally {
+    await $.process.run(['/bin/rmdir', lock]).catch(() => {})
+  }
+  return true
 }
 
 const sameSpot = (marker: Marker, now: NowPlaying) =>
@@ -163,7 +217,7 @@ async function onMicStart($: Dollar, app: string) {
   const config = await readConfig($)
   if (learning) {
     learning = false
-    if (!config.apps.includes(app)) await writeConfig($, { apps: [...config.apps, app] })
+    if (!config.apps.includes(app)) await writeConfig($, { ...config, apps: [...config.apps, app] })
     $.ui.toast(`dictation-music: added ${app}`)
     await log($, `learned ${app}`)
   } else if (!config.apps.includes(app)) {
@@ -171,6 +225,10 @@ async function onMicStart($: Dollar, app: string) {
   }
   const media = await mediaControl($)
   if (!media) return log($, 'media-control not found: not pausing')
+  await withLock($, () => pause($, media, config))
+}
+
+async function pause($: Dollar, media: string, config: Config) {
   const path = `${await stateDir($)}/paused.json`
   const before = await nowPlaying($, media)
   if (!before.playing) {
@@ -181,8 +239,10 @@ async function onMicStart($: Dollar, app: string) {
     }
     return log($, `nothing playing${marker?.pausedAt ? ': keeping the recent pause' : ''}`)
   }
-  await $.process.run([media, 'pause'], { timeoutMs: 5000 })
-  const marker: Marker = { pausedAt: Date.now(), app: before.app, track: before.track, position: before.position }
+  const since = Date.now()
+  await fade($, media, 'pause', config)
+  const position = await stoppedAt($, media, since, before.position)
+  const marker: Marker = { pausedAt: Date.now(), app: before.app, track: before.track, position }
   await $.fs.write(path, JSON.stringify(marker))
   await log($, `paused ${describe(marker)}`)
 }
@@ -196,13 +256,21 @@ async function onMicStop($: Dollar, app: string) {
 // the dictation app hasn't let go of the mic yet (it often submits first).
 async function resumeIfPaused($: Dollar, submitted = false) {
   const path = `${await stateDir($)}/paused.json`
-  const marker = await readJson<Marker>($, path)
-  if (!marker?.pausedAt) return
+  if (!(await readJson<Marker>($, path))?.pausedAt) return
+  const config = await readConfig($)
   const via = submitted ? 'prompt submitted' : 'Claude took a step'
   if (!submitted) {
-    const dictating = stillDictating(await readConfig($))
+    const dictating = stillDictating(config)
     if (dictating.length) return log($, `${via}: ${dictating.join(', ')} still has the mic, waiting`)
   }
+  // Busy: a submit and the step right after it both get here; one resumes.
+  await withLock($, () => resume($, path, config, via))
+}
+
+async function resume($: Dollar, path: string, config: Config, via: string) {
+  // Read again under the lock: whoever held it may have resumed already.
+  const marker = await readJson<Marker>($, path)
+  if (!marker?.pausedAt) return
   // Clear first so concurrent sessions don't both resume.
   await $.fs.write(path, '{}')
   // Joined a call since dictating: leave the music off.
@@ -216,7 +284,7 @@ async function resumeIfPaused($: Dollar, submitted = false) {
   if (!sameSpot(marker, now)) {
     return log($, `${via}: music changed since the pause (now ${describe(now)}, paused ${describe(marker)})`)
   }
-  await $.process.run([media, 'play'], { timeoutMs: 5000 })
+  await fade($, media, 'play', config)
   await log($, `${via}: resumed ${describe(marker)}`)
 }
 
@@ -266,11 +334,11 @@ async function runCommand($: Dollar, args: string): Promise<string> {
     case 'add':
       if (!target) return USAGE
       if (isMeetingApp(target)) return `${target} is a meeting app or browser, so it can't pause music.`
-      if (!config.apps.includes(target)) await writeConfig($, { apps: [...config.apps, target] })
+      if (!config.apps.includes(target)) await writeConfig($, { ...config, apps: [...config.apps, target] })
       return `Added ${target}.`
     case 'remove':
       if (!target) return USAGE
-      await writeConfig($, { apps: config.apps.filter(app => app !== target) })
+      await writeConfig($, { ...config, apps: config.apps.filter(app => app !== target) })
       return `Removed ${target}.`
     case 'log': {
       const text = await $.fs.read(`${await stateDir($)}/activity.log`).then(String, () => '')
@@ -278,7 +346,7 @@ async function runCommand($: Dollar, args: string): Promise<string> {
       return lines.length ? lines.join('\n') : 'Nothing logged yet.'
     }
     case 'reset':
-      await writeConfig($, { apps: DEFAULT_APPS })
+      await writeConfig($, { ...config, apps: DEFAULT_APPS })
       return `Back to the defaults: ${DEFAULT_APPS.join(', ')}.`
     default: {
       const media = await mediaControl($)
@@ -315,14 +383,15 @@ export const register: Register = on => {
 
   on('prompt.submit', async ($, e, next) => {
     const submitted = await next(e)
-    await resumeIfPaused($, true).catch(() => {})
+    // In the background: the fade-in takes a moment, and Claude shouldn't wait.
+    void resumeIfPaused($, true).catch(() => {})
     return submitted
   })
 
   // A message sent while Claude is already working joins the running turn
   // instead of arriving as a new prompt: catch it at the next model request.
   on('turn.step', async function* ($, e, next) {
-    if (!e.agentId) await resumeIfPaused($).catch(() => {})
+    if (!e.agentId) void resumeIfPaused($).catch(() => {})
     return yield* next(e)
   })
 }

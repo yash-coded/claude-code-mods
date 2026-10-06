@@ -28,15 +28,29 @@ type Host = {
   // What media-control reports; Spotify playing track-1 at 0:42 by default.
   player?: Partial<Player>
   hasMediaControl?: boolean
+  // Another session took the lock this long ago.
+  lockedAgoMs?: number
 }
 
 // Stands in for the machine beneath the mod: files in memory, a mic watcher
 // that prints `mic`, and a player media-control reads and drives.
-// Returns the media-control commands run, in order.
+// Returns what was done to the music, in order: media-control's get, pause
+// and play, and the fades ('fade-out', 'fade-in') that wrap a pause or play.
 function fakeHost(on: On, host: Host = {}): string[] {
   const files = host.files ?? {}
   const player: Player = { playing: true, app: SPOTIFY, track: TRACK, position: 42, ...host.player }
   const ran: string[] = []
+  const LOCK = `${DIR}/lock`
+  let lockedAt = host.lockedAgoMs === undefined ? undefined : Date.now() - host.lockedAgoMs
+  const done = (stdout = '', exitCode = 0) => ({
+    value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
+  })
+  // Pausing settles the reading: the position where it stopped, reported now.
+  const stop = () => {
+    if (player.playing) player.position += (player.reportedAgoMs ?? 0) / 1000
+    player.reportedAgoMs = 0
+    player.playing = false
+  }
   on('env.get', () => ({ value: HOME }))
   on('fs.read', (_$, e) => {
     const text = files[e.path]
@@ -48,6 +62,9 @@ function fakeHost(on: On, host: Host = {}): string[] {
     return { value: undefined }
   })
   on('fs.stat', (_$, e) => {
+    if (e.path === LOCK && lockedAt !== undefined) {
+      return { value: { kind: 'dir', size: 0, mtimeMs: lockedAt, isLink: false } }
+    }
     const found = e.path === HELPER || (e.path === MEDIA && host.hasMediaControl !== false)
     if (!found) throw new Error('ENOENT')
     return { value: { kind: 'file', size: 1, mtimeMs: 0, isLink: false } }
@@ -57,12 +74,22 @@ function fakeHost(on: On, host: Host = {}): string[] {
     if (e.argv[0] === '/bin/sh') {
       const [line, file] = e.argv.slice(-2) as [string, string]
       files[file] = (files[file] ?? '') + line + '\n'
-      return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+      return done()
     }
-    const verb = e.argv.at(-1)!
+    if (e.argv[0] === '/bin/mkdir') {
+      if (lockedAt !== undefined) return done('', 1)
+      lockedAt = Date.now()
+      return done()
+    }
+    if (e.argv[0] === '/bin/rmdir') {
+      lockedAt = undefined
+      return done()
+    }
+    // osascript fade.applescript out|in <media-control> <ms>
+    const verb = e.argv[0] === '/usr/bin/osascript' ? `fade-${e.argv[2]}` : e.argv.at(-1)!
     ran.push(verb)
-    if (verb === 'pause') player.playing = false
-    if (verb === 'play') player.playing = true
+    if (verb === 'pause' || verb === 'fade-out') stop()
+    if (verb === 'play' || verb === 'fade-in') player.playing = true
     const now = {
       playing: player.playing,
       bundleIdentifier: player.app,
@@ -71,8 +98,7 @@ function fakeHost(on: On, host: Host = {}): string[] {
       playbackRate: player.playing ? 1 : 0,
       timestamp: new Date(Date.now() - (player.reportedAgoMs ?? 0)).toISOString(),
     }
-    const stdout = verb === 'get' ? JSON.stringify(now) : ''
-    return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    return done(verb === 'get' ? JSON.stringify(now) : '')
   })
   on('process.spawn', async function* () {
     await host.speak
@@ -105,8 +131,10 @@ async function startSession($: Engine) {
 
 // The kit has no model beneath turn.step; the mod acts before handing the
 // step down, which is all these tests look at.
+// Resuming runs in the background, so each of these waits for it to land.
 async function submit($: Engine, text = 'hello') {
   await $.prompt.submit({ text, wait: false, origin: { kind: 'composer' } })
+  await settle()
 }
 
 async function command($: Engine, args: string) {
@@ -123,6 +151,7 @@ async function step($: Engine, agentId?: string) {
     for await (const _ of $.turn.step({ turnId: 't1', index: 1, model: 'm', messageCount: 3, agentId })) {
     }
   } catch {}
+  await settle()
 }
 
 // The mod paused Spotify's track-1 at 0:42, `ago` ms back.
@@ -135,7 +164,7 @@ test('pauses music when a dictation app starts recording', async ($, on) => {
   const files: Record<string, string> = {}
   const ran = fakeHost(on, { files, mic: ['ready', 'start com.typewhisper.mac'] })
   await startSession($)
-  expect(ran).toEqual(['get', 'pause'])
+  expect(ran).toEqual(['get', 'fade-out', 'get'])
   expect(JSON.parse(files[MARKER]!)).toMatchObject({ app: SPOTIFY, track: TRACK, position: 42 })
 })
 
@@ -149,7 +178,7 @@ test('uses the apps in config.json', async ($, on) => {
   const files = { [CONFIG]: JSON.stringify({ apps: ['com.example.flow'] }) }
   const ran = fakeHost(on, { files, mic: ['start com.example.flow'] })
   await startSession($)
-  expect(ran).toEqual(['get', 'pause'])
+  expect(ran).toEqual(['get', 'fade-out', 'get'])
 })
 
 test('does nothing without media-control', async ($, on) => {
@@ -178,14 +207,14 @@ test('never pauses for a meeting, nor for dictation during one', async ($, on) =
 test('pauses again for dictation once the meeting ends', async ($, on) => {
   const ran = fakeHost(on, { mic: ['start us.zoom.xos', 'stop us.zoom.xos', 'start com.typewhisper.mac'] })
   await startSession($)
-  expect(ran).toEqual(['get', 'pause'])
+  expect(ran).toEqual(['get', 'fade-out', 'get'])
 })
 
 test('resumes paused music once the prompt is submitted', async ($, on) => {
   const files = pausedByMod()
   const ran = fakeHost(on, { files, player: paused })
   await submit($)
-  expect(ran).toEqual(['get', 'play'])
+  expect(ran).toEqual(['get', 'fade-in'])
   expect(files[MARKER]).toBe('{}')
 })
 
@@ -195,7 +224,7 @@ test('a submitted prompt resumes even before the dictation app lets go of the mi
   await startSession($)
   ran.length = 0
   await submit($)
-  expect(ran).toEqual(['get', 'play'])
+  expect(ran).toEqual(['get', 'fade-in'])
   release()
 })
 
@@ -204,7 +233,7 @@ test('resumes for a message sent while Claude is working', async ($, on) => {
   await step($, 'subagent-1')
   expect(ran).toEqual([])
   await step($)
-  expect(ran).toEqual(['get', 'play'])
+  expect(ran).toEqual(['get', 'fade-in'])
 })
 
 test('waits for the dictation app to let go of the mic mid-turn', async ($, on) => {
@@ -226,7 +255,7 @@ test('a screen recorder on the mic does not hold up a mid-turn resume', async ($
   await startSession($)
   ran.length = 0
   await step($)
-  expect(ran).toEqual(['get', 'play'])
+  expect(ran).toEqual(['get', 'fade-in'])
   release()
 })
 
@@ -285,7 +314,7 @@ test('dictating again shortly after keeps the pause', async ($, on) => {
   const ran = fakeHost(on, { files, mic: ['start com.typewhisper.mac', 'stop com.typewhisper.mac'], player: paused })
   await startSession($)
   await submit($)
-  expect(ran).toEqual(['get', 'get', 'play'])
+  expect(ran).toEqual(['get', 'get', 'fade-in'])
 })
 
 test('learn adds the next app that uses the mic', async ($, on) => {
@@ -298,7 +327,7 @@ test('learn adds the next app that uses the mic', async ($, on) => {
   startDictating()
   await settle()
   expect(JSON.parse(files[CONFIG]!).apps).toContain('com.example.newapp')
-  expect(ran).toEqual(['get', 'pause'])
+  expect(ran).toEqual(['get', 'fade-out', 'get'])
   release()
 })
 
@@ -328,7 +357,7 @@ test('status names the apps, media-control and how to install it', async ($, on)
   expect(text).toContain('brew install media-control')
 })
 
-test('records where a playing track actually stopped, not its stale position', async ($, on) => {
+test('records where the track actually stopped, not its stale position', async ($, on) => {
   const files: Record<string, string> = {}
   // Reported as 0:27 three seconds ago, so it's really at about 0:30.
   fakeHost(on, { files, mic: ['start com.typewhisper.mac'], player: { position: 27, reportedAgoMs: 3000 } })
@@ -349,4 +378,34 @@ test('log shows what happened and why', async ($, on) => {
   expect(text).toContain(`paused ${SPOTIFY} ${TRACK} @42.0s`)
   expect(text).toContain(`prompt submitted: resumed ${SPOTIFY} ${TRACK} @42.0s`)
   release()
+})
+
+test('fades out to pause and in to resume, unless fade is off', async ($, on) => {
+  const files = { [CONFIG]: JSON.stringify({ apps: ['com.typewhisper.mac'], fade: false }) }
+  const [until, release] = hold()
+  const ran = fakeHost(on, { files, mic: ['start com.typewhisper.mac', 'stop com.typewhisper.mac'], until })
+  await startSession($)
+  await submit($)
+  expect(ran).toEqual(['get', 'pause', 'get', 'get', 'play'])
+  release()
+})
+
+test('leaves the music to the session that holds the lock', async ($, on) => {
+  const files: Record<string, string> = {}
+  const ran = fakeHost(on, { files, mic: ['start com.typewhisper.mac'], lockedAgoMs: 1000 })
+  await startSession($)
+  expect(ran).toEqual([])
+  expect(files[MARKER]).toBe(undefined)
+})
+
+test('takes over a lock left by a session that died', async ($, on) => {
+  const ran = fakeHost(on, { mic: ['start com.typewhisper.mac'], lockedAgoMs: 60_000 })
+  await startSession($)
+  expect(ran).toEqual(['get', 'fade-out', 'get'])
+})
+
+test('a submit and the step right after it resume once', async ($, on) => {
+  const ran = fakeHost(on, { files: pausedByMod(), player: paused })
+  await Promise.all([submit($), step($)])
+  expect(ran.filter(verb => verb === 'fade-in')).toEqual(['fade-in'])
 })
