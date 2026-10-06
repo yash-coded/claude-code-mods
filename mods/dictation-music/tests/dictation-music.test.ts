@@ -53,6 +53,12 @@ function fakeHost(on: On, host: Host = {}): string[] {
     return { value: { kind: 'file', size: 1, mtimeMs: 0, isLink: false } }
   })
   on('process.run', (_$, e) => {
+    // The activity log appends through the shell: sh -c '...' sh <line> <file>.
+    if (e.argv[0] === '/bin/sh') {
+      const [line, file] = e.argv.slice(-2) as [string, string]
+      files[file] = (files[file] ?? '') + line + '\n'
+      return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    }
     const verb = e.argv.at(-1)!
     ran.push(verb)
     if (verb === 'pause') player.playing = false
@@ -204,11 +210,23 @@ test('resumes for a message sent while Claude is working', async ($, on) => {
 test('waits for the dictation app to let go of the mic mid-turn', async ($, on) => {
   const files = pausedByMod()
   const [until, release] = hold()
-  const ran = fakeHost(on, { files, mic: ['start com.example.recorder'], until, player: paused })
+  const ran = fakeHost(on, { files, mic: ['start com.typewhisper.mac'], until, player: paused })
   await startSession($)
+  ran.length = 0
   await step($)
   expect(ran).toEqual([])
   expect(JSON.parse(files[MARKER]!).pausedAt).toBeGreaterThan(0)
+  release()
+})
+
+test('a screen recorder on the mic does not hold up a mid-turn resume', async ($, on) => {
+  const [until, release] = hold()
+  const mic = ['start com.timpler.screenstudio.helper', 'start com.typewhisper.mac', 'stop com.typewhisper.mac']
+  const ran = fakeHost(on, { files: pausedByMod(), mic, until, player: paused })
+  await startSession($)
+  ran.length = 0
+  await step($)
+  expect(ran).toEqual(['get', 'play'])
   release()
 })
 
@@ -318,4 +336,17 @@ test('records where a playing track actually stopped, not its stale position', a
   const { position } = JSON.parse(files[MARKER]!)
   expect(position).toBeGreaterThan(29.5)
   expect(position).toBeLessThan(31)
+})
+
+test('log shows what happened and why', async ($, on) => {
+  const files: Record<string, string> = {}
+  const [until, release] = hold()
+  fakeHost(on, { files, mic: ['start com.typewhisper.mac', 'stop com.typewhisper.mac'], until })
+  await startSession($)
+  await submit($)
+  const { text } = await command($, 'log')
+  expect(text).toContain('mic start: com.typewhisper.mac')
+  expect(text).toContain(`paused ${SPOTIFY} ${TRACK} @42.0s`)
+  expect(text).toContain(`prompt submitted: resumed ${SPOTIFY} ${TRACK} @42.0s`)
+  release()
 })

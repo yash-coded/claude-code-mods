@@ -46,7 +46,11 @@ const FORGET_MS = 2 * 60 * 1000
 // How far the track may have moved while paused (seconds) and still be ours.
 const POSITION_SLACK = 3
 
-const USAGE = 'Usage: /dictation-music [learn | add <bundle-id> | remove <bundle-id> | reset]'
+// The activity log `/dictation-music log` shows: lines kept, and shown.
+const LOG_KEEP = 500
+const LOG_SHOW = 25
+
+const USAGE = 'Usage: /dictation-music [learn | add <bundle-id> | remove <bundle-id> | reset | log]'
 
 // What the mod paused, so it resumes only that, untouched since.
 type Marker = { pausedAt?: number; app?: string; track?: string; position?: number }
@@ -59,11 +63,14 @@ const capturing = new Set<string>()
 let learning = false
 // What `/dictation-music` reports about the mic watcher.
 let watcher = 'starting'
+// Tells this session's lines apart in the shared activity log.
+const SESSION = Date.now().toString(36).slice(-4)
 
 const isMeetingApp = (app: string) => MEETING_APPS.some(prefix => app.startsWith(prefix))
 const inMeeting = () => [...capturing].some(isMeetingApp)
-// Something other than a meeting still has the mic open: still dictating.
-const stillDictating = () => [...capturing].some(app => !isMeetingApp(app))
+// Dictation apps still holding the mic. Only the configured ones count: a
+// screen recorder or other app using the mic is no sign of dictating.
+const stillDictating = (config: Config) => [...capturing].filter(app => config.apps.includes(app))
 
 async function stateDir($: Dollar): Promise<string> {
   return `${await $.env.get('HOME')}/.claude/dictation-music`
@@ -76,6 +83,25 @@ async function readJson<T>($: Dollar, path: string): Promise<T | undefined> {
     return undefined
   }
 }
+
+// Appends one line to the activity log. Every session writes to the same file,
+// so it appends (atomic for a short line) instead of rewriting it.
+async function log($: Dollar, message: string) {
+  const line = `${new Date().toISOString()} [${SESSION}] ${message}`
+  await $.process
+    .run(['/bin/sh', '-c', 'printf "%s\\n" "$1" >> "$2"', 'sh', line, `${await stateDir($)}/activity.log`])
+    .catch(() => {})
+}
+
+async function trimLog($: Dollar) {
+  const path = `${await stateDir($)}/activity.log`
+  const text = await $.fs.read(path).then(String, () => '')
+  const lines = text.split('\n').filter(Boolean)
+  if (lines.length > LOG_KEEP * 2) await $.fs.write(path, lines.slice(-LOG_KEEP).join('\n') + '\n')
+}
+
+const describe = (at: { app?: string; track?: string; position?: number }) =>
+  `${at.app ?? '?'} ${at.track ?? '?'} @${at.position === undefined ? '?' : at.position.toFixed(1)}s`
 
 async function exists($: Dollar, path: string): Promise<boolean> {
   return $.fs.stat(path).then(
@@ -132,27 +158,38 @@ const sameSpot = (marker: Marker, now: NowPlaying) =>
 
 async function onMicStart($: Dollar, app: string) {
   capturing.add(app)
-  if (isMeetingApp(app) || inMeeting()) return
+  await log($, `mic start: ${app}`)
+  if (isMeetingApp(app) || inMeeting()) return log($, 'on a call: not pausing')
   const config = await readConfig($)
   if (learning) {
     learning = false
     if (!config.apps.includes(app)) await writeConfig($, { apps: [...config.apps, app] })
     $.ui.toast(`dictation-music: added ${app}`)
+    await log($, `learned ${app}`)
   } else if (!config.apps.includes(app)) {
     return
   }
   const media = await mediaControl($)
-  if (!media) return
+  if (!media) return log($, 'media-control not found: not pausing')
   const path = `${await stateDir($)}/paused.json`
   const before = await nowPlaying($, media)
   if (!before.playing) {
     const marker = await readJson<Marker>($, path)
-    if (marker?.pausedAt && Date.now() - marker.pausedAt > FORGET_MS) await $.fs.write(path, '{}')
-    return
+    if (marker?.pausedAt && Date.now() - marker.pausedAt > FORGET_MS) {
+      await $.fs.write(path, '{}')
+      return log($, 'nothing playing: forgot an old pause')
+    }
+    return log($, `nothing playing${marker?.pausedAt ? ': keeping the recent pause' : ''}`)
   }
   await $.process.run([media, 'pause'], { timeoutMs: 5000 })
   const marker: Marker = { pausedAt: Date.now(), app: before.app, track: before.track, position: before.position }
   await $.fs.write(path, JSON.stringify(marker))
+  await log($, `paused ${describe(marker)}`)
+}
+
+async function onMicStop($: Dollar, app: string) {
+  capturing.delete(app)
+  await log($, `mic stop: ${app}`)
 }
 
 // `submitted`: the person sent the prompt, so they're done dictating even if
@@ -161,18 +198,26 @@ async function resumeIfPaused($: Dollar, submitted = false) {
   const path = `${await stateDir($)}/paused.json`
   const marker = await readJson<Marker>($, path)
   if (!marker?.pausedAt) return
-  if (!submitted && stillDictating()) return
+  const via = submitted ? 'prompt submitted' : 'Claude took a step'
+  if (!submitted) {
+    const dictating = stillDictating(await readConfig($))
+    if (dictating.length) return log($, `${via}: ${dictating.join(', ')} still has the mic, waiting`)
+  }
   // Clear first so concurrent sessions don't both resume.
   await $.fs.write(path, '{}')
   // Joined a call since dictating: leave the music off.
-  if (inMeeting()) return
-  if (Date.now() - marker.pausedAt > STALE_MS) return
+  if (inMeeting()) return log($, `${via}: on a call, leaving the music off`)
+  if (Date.now() - marker.pausedAt > STALE_MS) return log($, `${via}: pause is too old, leaving it`)
   const media = await mediaControl($)
-  if (!media) return
+  if (!media) return log($, `${via}: media-control not found`)
   // Played, skipped or switched since the pause: the person took over.
   const now = await nowPlaying($, media)
-  if (now.playing || !sameSpot(marker, now)) return
+  if (now.playing) return log($, `${via}: music is already playing`)
+  if (!sameSpot(marker, now)) {
+    return log($, `${via}: music changed since the pause (now ${describe(now)}, paused ${describe(marker)})`)
+  }
   await $.process.run([media, 'play'], { timeoutMs: 5000 })
+  await log($, `${via}: resumed ${describe(marker)}`)
 }
 
 // Builds the mic watcher on first run, then reports each app that starts or
@@ -204,7 +249,7 @@ async function watchMic($: Dollar) {
       const [event, ...rest] = line.trim().split(' ')
       const app = rest.join(' ')
       if (event === 'start') await onMicStart($, app)
-      else if (event === 'stop') capturing.delete(app)
+      else if (event === 'stop') await onMicStop($, app)
     }
   }
   watcher = 'stopped'
@@ -227,6 +272,11 @@ async function runCommand($: Dollar, args: string): Promise<string> {
       if (!target) return USAGE
       await writeConfig($, { apps: config.apps.filter(app => app !== target) })
       return `Removed ${target}.`
+    case 'log': {
+      const text = await $.fs.read(`${await stateDir($)}/activity.log`).then(String, () => '')
+      const lines = text.split('\n').filter(Boolean).slice(-LOG_SHOW)
+      return lines.length ? lines.join('\n') : 'Nothing logged yet.'
+    }
     case 'reset':
       await writeConfig($, { apps: DEFAULT_APPS })
       return `Back to the defaults: ${DEFAULT_APPS.join(', ')}.`
@@ -248,9 +298,10 @@ export const register: Register = on => {
     await $.command.register({
       name: 'dictation-music',
       description: 'Choose which dictation apps pause your music',
-      argumentHint: '[learn | add <bundle-id> | remove <bundle-id> | reset]',
+      argumentHint: '[learn | add <bundle-id> | remove <bundle-id> | reset | log]',
     })
     if (!(await mediaControl($))) $.ui.toast(`dictation-music: ${INSTALL_HINT}`)
+    await trimLog($)
     void watchMic($).catch(err => {
       watcher = `failed: ${String(err)}`
       $.ui.log(`dictation-music: ${String(err)}`, { to: 'debug' })
