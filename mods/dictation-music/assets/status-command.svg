@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 230" width="980" height="230" role="img" aria-labelledby="title desc">
+  <title id="title">The /dictation-music command</title>
+  <desc id="desc">Running /dictation-music in Claude Code shows which apps pause your music, where media-control was found, that the mic watcher is running, and the available commands.</desc>
+  <style>
+    .mono { font: 400 15px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .prompt { fill: #d2a8ff; }
+    .cmd { fill: #f0f6fc; font-weight: 600; }
+    .label { fill: #8b949e; }
+    .value { fill: #f0f6fc; }
+    .ok { fill: #3fb950; }
+  </style>
+  <rect x="0" y="0" width="980" height="230" rx="14" fill="#0d1117"/>
+  <rect x="0" y="0" width="980" height="38" rx="14" fill="#161b22"/>
+  <rect x="0" y="24" width="980" height="14" fill="#161b22"/>
+  <circle cx="24" cy="19" r="6" fill="#ff5f57"/>
+  <circle cx="44" cy="19" r="6" fill="#febc2e"/>
+  <circle cx="64" cy="19" r="6" fill="#28c840"/>
+  <text x="490" y="24" text-anchor="middle" class="mono label" style="font-size:13px">Claude Code</text>
+
+  <text x="28" y="76" class="mono"><tspan class="prompt">❯ </tspan><tspan class="cmd">/dictation-music</tspan></text>
+  <text x="28" y="112" class="mono"><tspan class="label">dictation-music: Pausing music for: </tspan><tspan class="value">com.typewhisper.mac, com.superduper.superwhisper</tspan></text>
+  <text x="28" y="138" class="mono"><tspan class="label">Media control: </tspan><tspan class="value">/opt/homebrew/bin/media-control</tspan></text>
+  <text x="28" y="164" class="mono"><tspan class="label">Mic watcher: </tspan><tspan class="ok">running</tspan></text>
+  <text x="28" y="198" class="mono label">Usage: /dictation-music [learn | add &lt;bundle-id&gt; | remove &lt;bundle-id&gt; | reset]</text>
+</svg>

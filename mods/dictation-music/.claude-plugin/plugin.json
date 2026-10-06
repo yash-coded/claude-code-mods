@@ -1,0 +1,18 @@
+{
+  "name": "dictation-music",
+  "version": "0.3.0",
+  "description": "Pauses your music while you dictate a prompt, and resumes it once the prompt is submitted. Leaves meetings alone.",
+  "author": {
+    "name": "Yash Patel"
+  },
+  "license": "MIT",
+  "keywords": [
+    "dictation",
+    "music",
+    "macos",
+    "voice",
+    "focus"
+  ],
+  "homepage": "https://github.com/yash-coded/claude-code-mods/tree/main/mods/dictation-music",
+  "repository": "https://github.com/yash-coded/claude-code-mods"
+}

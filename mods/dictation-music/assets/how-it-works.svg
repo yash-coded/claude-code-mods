@@ -1,0 +1,70 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 340" width="900" height="340" role="img" aria-labelledby="title desc">
+  <title id="title">How dictation-music works</title>
+  <desc id="desc">Music is playing. When you start dictating, the music pauses. When you submit the prompt, the music resumes. On a call, nothing is paused or resumed, and music you changed yourself is left alone.</desc>
+  <style>
+    .card { fill: #ffffff; stroke: #d0d7de; stroke-width: 1.5; }
+    .badge { fill: #24292f; }
+    .badge-text { fill: #ffffff; font: 600 15px -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; }
+    .heading { fill: #1f2328; font: 600 19px -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; }
+    .body { fill: #59636e; font: 400 14px -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; }
+    .pill-text { font: 600 14px -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; }
+    .note { fill: #f6f8fa; stroke: #d0d7de; stroke-width: 1.5; }
+    .note-heading { fill: #1f2328; font: 600 14px -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; }
+    .arrow { stroke: #8c959f; stroke-width: 2.5; fill: none; }
+    .arrow-head { fill: #8c959f; }
+  </style>
+
+  <rect x="0" y="0" width="900" height="340" rx="16" fill="#f6f8fa"/>
+
+  <!-- Step 1 -->
+  <rect class="card" x="30" y="30" width="250" height="170" rx="12"/>
+  <circle class="badge" cx="62" cy="62" r="15"/>
+  <text class="badge-text" x="62" y="67" text-anchor="middle">1</text>
+  <text class="heading" x="88" y="69">Music is playing</text>
+  <text class="body" x="50" y="104">Spotify, Apple Music, YouTube</text>
+  <text class="body" x="50" y="124">in a browser: anything in</text>
+  <text class="body" x="50" y="144">macOS Now Playing.</text>
+  <rect x="50" y="160" width="110" height="28" rx="14" fill="#dafbe1"/>
+  <text class="pill-text" x="105" y="179" text-anchor="middle" fill="#1a7f37">♪ Playing</text>
+
+  <!-- Arrow 1 -> 2 -->
+  <path class="arrow" d="M286 115 H 314"/>
+  <path class="arrow-head" d="M322 115 l -10 -6 v 12 z"/>
+
+  <!-- Step 2 -->
+  <rect class="card" x="325" y="30" width="250" height="170" rx="12"/>
+  <circle class="badge" cx="357" cy="62" r="15"/>
+  <text class="badge-text" x="357" y="67" text-anchor="middle">2</text>
+  <text class="heading" x="383" y="69">You start dictating</text>
+  <text class="body" x="345" y="104">Press your dictation hotkey.</text>
+  <text class="body" x="345" y="124">The moment the app opens</text>
+  <text class="body" x="345" y="144">the mic, the music pauses.</text>
+  <rect x="345" y="160" width="110" height="28" rx="14" fill="#fff1e5"/>
+  <text class="pill-text" x="400" y="179" text-anchor="middle" fill="#bc4c00">❚❚ Paused</text>
+
+  <!-- Arrow 2 -> 3 -->
+  <path class="arrow" d="M581 115 H 609"/>
+  <path class="arrow-head" d="M617 115 l -10 -6 v 12 z"/>
+
+  <!-- Step 3 -->
+  <rect class="card" x="620" y="30" width="250" height="170" rx="12"/>
+  <circle class="badge" cx="652" cy="62" r="15"/>
+  <text class="badge-text" x="652" y="67" text-anchor="middle">3</text>
+  <text class="heading" x="678" y="69">You hit Enter</text>
+  <text class="body" x="640" y="104">Claude starts working and</text>
+  <text class="body" x="640" y="124">your music picks up right</text>
+  <text class="body" x="640" y="144">where it stopped.</text>
+  <rect x="640" y="160" width="110" height="28" rx="14" fill="#dafbe1"/>
+  <text class="pill-text" x="695" y="179" text-anchor="middle" fill="#1a7f37">▶ Resumed</text>
+
+  <!-- Notes -->
+  <rect class="note" x="30" y="225" width="407" height="88" rx="12"/>
+  <text class="note-heading" x="50" y="255">On a call?</text>
+  <text class="body" x="50" y="279">Zoom, Google Meet, Teams, Slack, FaceTime:</text>
+  <text class="body" x="50" y="299">while they have the mic, nothing is touched.</text>
+
+  <rect class="note" x="463" y="225" width="407" height="88" rx="12"/>
+  <text class="note-heading" x="483" y="255">Changed the music yourself?</text>
+  <text class="body" x="483" y="279">If it was already off, or you played, skipped or</text>
+  <text class="body" x="483" y="299">switched it, it stays the way you left it.</text>
+</svg>
